@@ -36,6 +36,8 @@ function CreateRoom() {
     setLoading(true);
     setError('');
 
+    console.log('🏠 Creating room with API:', API_BASE);
+
     try {
       const response = await fetch(`${API_BASE}/rooms`, {
         method: 'POST',
@@ -48,6 +50,7 @@ function CreateRoom() {
       const data = await response.json();
 
       if (response.ok) {
+        console.log('✅ Room created successfully');
         // Room created successfully, navigate to the room
         navigate(`/room/${formData.roomId}`, {
           state: {
@@ -58,9 +61,11 @@ function CreateRoom() {
           }
         });
       } else {
+        console.error('❌ Room creation failed:', data.error);
         setError(data.error || 'Failed to create room');
       }
     } catch (error) {
+      console.error('❌ Network error:', error);
       setError('Network error. Please try again.');
     } finally {
       setLoading(false);

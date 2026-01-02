@@ -11,7 +11,17 @@ const config = {
 };
 
 // Determine current environment
-const environment = process.env.NODE_ENV || 'development';
+// Check if we're running on localhost (development) or deployed (production)
+const isLocalhost = window.location.hostname === 'localhost' || 
+                   window.location.hostname === '127.0.0.1' ||
+                   window.location.hostname.includes('localhost');
+
+const environment = isLocalhost ? 'development' : 'production';
+
+console.log('🌍 Environment detected:', environment);
+console.log('🔗 Current hostname:', window.location.hostname);
+console.log('📡 API Base:', config[environment].API_BASE);
+console.log('🔌 Socket URL:', config[environment].SOCKET_URL);
 
 // Export current configuration
 export const API_BASE = config[environment].API_BASE;

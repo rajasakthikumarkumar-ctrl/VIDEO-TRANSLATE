@@ -37,6 +37,8 @@ function JoinRoom() {
     setLoading(true);
     setError('');
 
+    console.log('🚪 Joining room with API:', API_BASE);
+
     try {
       // Verify room and passcode
       const response = await fetch(`${API_BASE}/rooms/${formData.roomId}/verify`, {
@@ -50,6 +52,7 @@ function JoinRoom() {
       const data = await response.json();
 
       if (response.ok) {
+        console.log('✅ Room verification successful');
         // Room verified, navigate to the room
         navigate(`/room/${formData.roomId}`, {
           state: {
@@ -60,9 +63,11 @@ function JoinRoom() {
           }
         });
       } else {
+        console.error('❌ Room verification failed:', data.error);
         setError(data.error || 'Failed to join room');
       }
     } catch (error) {
+      console.error('❌ Network error:', error);
       setError('Network error. Please try again.');
     } finally {
       setLoading(false);

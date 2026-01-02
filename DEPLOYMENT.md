@@ -2,81 +2,94 @@
 
 ## Backend Deployment (Render)
 
-Your backend is already deployed at: `https://video-meet-aj54.onrender.com`
+Your backend is deployed at: `https://video-meet-aj54.onrender.com`
 
-### Environment Variables on Render:
-- `NODE_ENV=production`
-- `PORT` (automatically set by Render)
+## Frontend Deployment (Render)
 
-### Server Configuration:
-- The server automatically uses `process.env.PORT` for Render compatibility
-- CORS is configured to allow requests from your frontend domains
-- WebSocket connections are supported
+Your frontend is deployed at: `https://video-meet-client.onrender.com`
 
-## Frontend Configuration
+## Environment Configuration
 
-The frontend automatically detects the environment and uses the appropriate backend URL:
+The frontend automatically detects the environment based on the hostname:
 
-### Development:
+### Development (localhost):
 - API: `http://localhost:5001/api`
 - Socket: `http://localhost:5001`
 
-### Production:
+### Production (Render):
 - API: `https://video-meet-aj54.onrender.com/api`
 - Socket: `https://video-meet-aj54.onrender.com`
 
-## Local Development
+## Deployment Steps
 
-1. **Start Backend Locally** (optional):
-   ```bash
-   cd server
-   npm start
-   ```
+### 1. Update Configuration
+The `client/src/config.js` file automatically detects the environment:
+```javascript
+const isLocalhost = window.location.hostname === 'localhost' || 
+                   window.location.hostname === '127.0.0.1' ||
+                   window.location.hostname.includes('localhost');
 
-2. **Start Frontend**:
-   ```bash
-   cd client
-   npm start
-   ```
+const environment = isLocalhost ? 'development' : 'production';
+```
 
-## Production Build
-
-To create a production build of the frontend:
-
+### 2. Build Frontend
 ```bash
 cd client
+npm install
 npm run build
 ```
 
-## Features Included
+### 3. Deploy to Render
+1. Commit and push all changes to GitHub
+2. Go to your Render dashboard
+3. Select your frontend service
+4. Click "Manual Deploy" → "Latest commit"
+5. Wait for deployment to complete
 
-✅ **Video Calling**: HD video and audio communication
-✅ **Admin Controls**: Host can remove participants and end meetings
-✅ **Recording**: Local recording of video/audio (browser-only)
-✅ **Chat**: Real-time messaging during calls
-✅ **Screen Sharing**: Share your screen with participants
-✅ **Reactions**: Send emoji reactions during calls
-✅ **Raise Hand**: Virtual hand raising feature
-✅ **Room Management**: Create and join rooms with passcodes
-✅ **Responsive UI**: Works on desktop and mobile devices
+### 4. Update Backend CORS
+The backend is configured to allow requests from:
+- `https://video-meet-client.onrender.com` (your frontend)
+- `https://video-meet-aj54.onrender.com` (your backend)
+- `http://localhost:3000` and `http://localhost:3001` (local development)
 
-## Security Features
+## Testing Deployment
 
-- Passcode-protected rooms
-- Admin-only controls
-- CORS protection
-- Local-only recording (no server storage)
-- Secure WebSocket connections
-
-## Browser Compatibility
-
-- Chrome (recommended)
-- Firefox
-- Safari
-- Edge
+1. **Open Frontend**: Go to `https://video-meet-client.onrender.com`
+2. **Create Room**: Click "Create Room" and fill in details
+3. **Join from Another Device**: Use different device/browser to join
+4. **Test Features**: Video, audio, chat, screen sharing, recording
 
 ## Troubleshooting
 
-1. **Connection Issues**: Check if the Render backend is running
-2. **Video/Audio Issues**: Ensure browser permissions are granted
-3. **Recording Issues**: Check browser compatibility with MediaRecorder API
+### Network Error Issues:
+- Check browser console for configuration logs
+- Verify backend is running at `https://video-meet-aj54.onrender.com`
+- Ensure CORS is properly configured
+
+### Console Logs:
+The app logs configuration details:
+```
+🌍 Environment detected: production
+🔗 Current hostname: video-meet-client.onrender.com
+📡 API Base: https://video-meet-aj54.onrender.com/api
+🔌 Socket URL: https://video-meet-aj54.onrender.com
+```
+
+## Features Available
+
+✅ **Cross-Device Video Calling**: Works across different devices and networks
+✅ **Admin Controls**: Host can remove participants and end meetings
+✅ **Local Recording**: Record video/audio locally on each device
+✅ **Real-time Chat**: Messaging during video calls
+✅ **Screen Sharing**: Share screen with all participants
+✅ **Reactions & Hand Raising**: Interactive meeting features
+✅ **Responsive Design**: Works on desktop and mobile
+✅ **Secure Rooms**: Passcode-protected meetings
+
+## Security Features
+
+- HTTPS connections for all communications
+- Passcode-protected rooms
+- CORS protection configured for your domains
+- Local-only recording (no server storage)
+- Admin-only controls for meeting management

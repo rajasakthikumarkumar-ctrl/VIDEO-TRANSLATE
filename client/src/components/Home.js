@@ -3,6 +3,9 @@ import { Link } from 'react-router-dom';
 import { API_BASE } from '../config';
 import './Home.css';
 
+// Import test for configuration verification
+import '../test-config';
+
 function Home() {
   const [upcomingEvents, setUpcomingEvents] = useState([]);
 
@@ -11,12 +14,14 @@ function Home() {
   }, []);
 
   const fetchUpcomingEvents = async () => {
+    console.log('📅 Fetching upcoming events from:', API_BASE);
     try {
       const response = await fetch(`${API_BASE}/rooms`);
       const rooms = await response.json();
+      console.log('✅ Fetched rooms:', rooms.length);
       setUpcomingEvents(rooms);
     } catch (error) {
-      console.error('Error fetching rooms:', error);
+      console.error('❌ Error fetching rooms:', error);
     }
   };
 

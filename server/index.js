@@ -8,7 +8,12 @@ const app = express();
 // CORS configuration for production
 const corsOptions = {
   origin: process.env.NODE_ENV === 'production' 
-    ? ['https://video-meet-aj54.onrender.com', 'http://localhost:3000', 'http://localhost:3001']
+    ? [
+        'https://video-meet-aj54.onrender.com', 
+        'https://video-meet-client.onrender.com',
+        'http://localhost:3000', 
+        'http://localhost:3001'
+      ]
     : "*",
   credentials: true,
   methods: ["GET", "POST", "PUT", "DELETE"],
@@ -23,7 +28,12 @@ const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
     origin: process.env.NODE_ENV === 'production' 
-      ? ['https://video-meet-aj54.onrender.com', 'http://localhost:3000', 'http://localhost:3001']
+      ? [
+          'https://video-meet-aj54.onrender.com', 
+          'https://video-meet-client.onrender.com',
+          'http://localhost:3000', 
+          'http://localhost:3001'
+        ]
       : "*",
     methods: ["GET", "POST"],
     credentials: true

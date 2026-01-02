@@ -9,6 +9,12 @@ function VideoCall() {
   const location = useLocation();
   const navigate = useNavigate();
   
+  // Log configuration on component mount
+  useEffect(() => {
+    console.log('🎥 VideoCall component loaded');
+    console.log('🔌 Socket URL:', SOCKET_URL);
+  }, []);
+  
   // State management
   const [participants, setParticipants] = useState([]);
   const [remoteStreams, setRemoteStreams] = useState(new Map());
