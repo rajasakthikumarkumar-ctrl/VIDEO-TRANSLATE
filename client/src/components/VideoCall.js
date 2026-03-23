@@ -924,83 +924,110 @@ function VideoCall() {
       const participantName = location.state?.participantName || 'Unknown';
       let isRunning = true;
 
-      // Recursive function: record for 5s, send, repeat
+      // --- Speech detection via Web Audio API ---
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const audioStream = new MediaStream([audioTrack]);
+      const sourceNode = audioContext.createMediaStreamSource(audioStream);
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 2048;
+      sourceNode.connect(analyser);
+      const dataArray = new Float32Array(analyser.fftSize);
+
+      // Returns RMS energy of current audio frame (0.0 – 1.0)
+      const getRMS = () => {
+        analyser.getFloatTimeDomainData(dataArray);
+        let sum = 0;
+        for (let i = 0; i < dataArray.length; i++) sum += dataArray[i] * dataArray[i];
+        return Math.sqrt(sum / dataArray.length);
+      };
+
+      // Sample RMS over the recording window to decide if speech was present
+      const SPEECH_THRESHOLD = 0.015; // tune: raise if too sensitive, lower if missing speech
+      const SAMPLE_INTERVAL_MS = 100;
+
+      // Recursive function: record for 5s, check energy, send if speech detected
       const recordAndSend = () => {
         if (!isRunning || !continuousRecorderRef.current) return;
 
-        const audioStream = new MediaStream([audioTrack]);
+        const recStream = new MediaStream([audioTrack]);
         const mimeType = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus']
           .find(m => MediaRecorder.isTypeSupported(m)) || 'audio/webm';
 
-        const recorder = new MediaRecorder(audioStream, { mimeType });
+        const recorder = new MediaRecorder(recStream, { mimeType });
         const chunks = [];
+        let maxRms = 0;
+
+        // Sample audio energy while recording
+        const energySampler = setInterval(() => {
+          const rms = getRMS();
+          if (rms > maxRms) maxRms = rms;
+        }, SAMPLE_INTERVAL_MS);
 
         recorder.ondataavailable = (e) => {
           if (e.data && e.data.size > 0) chunks.push(e.data);
         };
 
         recorder.onstop = () => {
+          clearInterval(energySampler);
           if (!isRunning) return;
 
           const blob = new Blob(chunks, { type: mimeType });
-          console.log(`📊 Audio blob: ${blob.size} bytes`);
+          console.log(`📊 Audio blob: ${blob.size} bytes | maxRMS: ${maxRms.toFixed(4)}`);
 
-          if (blob.size > 5000) {
-            setTranslationStatus('Sending to server...');
-            const reader = new FileReader();
-            reader.readAsDataURL(blob);
-            reader.onloadend = () => {
-              if (!isRunning) return;
-              if (socketRef.current?.connected) {
-                socketRef.current.emit('continuous-audio', {
-                  audio: reader.result,
-                  roomId,
-                  speakerName: participantName
-                });
-                console.log('✅ Audio sent to server');
-                setTranslationStatus('✅ Sent — listening...');
-              }
-              // Schedule next recording immediately after sending
-              setTimeout(() => {
-                setTranslationStatus('🎤 Listening...');
-                recordAndSend();
-              }, 300);
-            };
-          } else {
-            console.log('⚠️ Silence detected, skipping');
-            setTranslationStatus('⚠️ Silence — listening...');
-            // Still schedule next recording
+          const hasSpeech = maxRms >= SPEECH_THRESHOLD;
+
+          if (!hasSpeech) {
+            console.log(`🔇 Silence (RMS ${maxRms.toFixed(4)} < ${SPEECH_THRESHOLD}), skipping`);
+            setTranslationStatus('🔇 Silence — listening...');
             setTimeout(() => {
-              setTranslationStatus('🎤 Listening...');
-              recordAndSend();
+              if (isRunning) { setTranslationStatus('🎤 Listening...'); recordAndSend(); }
             }, 300);
+            return;
           }
+
+          setTranslationStatus('🗣️ Speech detected — sending...');
+          const reader = new FileReader();
+          reader.readAsDataURL(blob);
+          reader.onloadend = () => {
+            if (!isRunning) return;
+            if (socketRef.current?.connected) {
+              socketRef.current.emit('continuous-audio', {
+                audio: reader.result,
+                roomId,
+                speakerName: participantName
+              });
+              console.log('✅ Audio sent to server');
+              setTranslationStatus('✅ Sent — listening...');
+            }
+            setTimeout(() => {
+              if (isRunning) { setTranslationStatus('🎤 Listening...'); recordAndSend(); }
+            }, 300);
+          };
         };
 
         recorder.onerror = (e) => {
+          clearInterval(energySampler);
           console.error('❌ Recorder error:', e.error);
-          setTimeout(recordAndSend, 1000);
+          setTimeout(() => { if (isRunning) recordAndSend(); }, 1000);
         };
 
-        // Store current recorder so we can stop it if needed
         continuousRecorderRef.current.recorder = recorder;
-
         recorder.start();
         setTranslationStatus('🎤 Listening...');
         console.log('🎙️ Recording started, will stop in 5s...');
 
-        // Stop after 5 seconds to process
         setTimeout(() => {
-          if (recorder.state === 'recording') {
-            recorder.stop();
-          }
+          if (recorder.state === 'recording') recorder.stop();
         }, 5000);
       };
 
-      // Initialize ref with stop control
+      // Initialize ref with stop control (also closes AudioContext on stop)
       continuousRecorderRef.current = {
         recorder: null,
-        stop: () => { isRunning = false; }
+        stop: () => {
+          isRunning = false;
+          try { audioContext.close(); } catch (e) {}
+        }
       };
 
       recordAndSend();
