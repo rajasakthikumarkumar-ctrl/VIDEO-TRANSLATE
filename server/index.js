@@ -78,6 +78,9 @@ cleanupTempFiles();
 // Store rooms and their participants
 const rooms = new Map();
 const userSockets = new Map();
+// Per-room active speaker lock: roomId → { socketId, lockedAt }
+const activeSpeakers = new Map();
+const SPEAKER_LOCK_TIMEOUT_MS = 12000; // auto-release if server hangs
 
 // Health check endpoint (keeps Render service alive)
 app.get('/health', (req, res) => {
@@ -251,42 +254,53 @@ io.on("connection", socket => {
   socket.on("continuous-audio", async (audioData) => {
     try {
       const { audio, roomId, speakerName } = audioData;
-      console.log(`\n${'='.repeat(60)}`);
-      console.log(`🎤 CONTINUOUS AUDIO RECEIVED`);
-      console.log(`   Speaker: ${speakerName} (${socket.id})`);
-      console.log(`   Room: ${roomId}`);
-      console.log(`   Audio size: ${audio ? audio.length : 0} chars`);
-      console.log(`${'='.repeat(60)}\n`);
-      
+
       const room = rooms.get(roomId);
       if (!room) {
         console.log(`❌ Room ${roomId} not found`);
-        console.log(`   Available rooms:`, Array.from(rooms.keys()));
         return;
       }
 
-      console.log(`✅ Room found: ${roomId}`);
-      console.log(`   Participants in room: ${room.participants.length}`);
-      room.participants.forEach(p => {
-        console.log(`   - ${p.name} (${p.id}) [${p.translationLanguage || 'no lang'}]`);
-      });
+      // ── Speaker lock: only one active speaker per room ───────────────────
+      const now = Date.now();
+      const current = activeSpeakers.get(roomId);
+
+      if (current && current.socketId !== socket.id) {
+        // Auto-release stale lock (in case previous processing hung)
+        if (now - current.lockedAt < SPEAKER_LOCK_TIMEOUT_MS) {
+          console.log(`🔒 Room ${roomId} busy — ${current.speakerName} is speaking, dropping ${speakerName}'s chunk`);
+          socket.emit('speaker-busy', { activeSpeaker: current.speakerName });
+          return;
+        }
+        console.log(`⏰ Stale speaker lock released for ${current.speakerName}`);
+      }
+
+      // Acquire lock
+      activeSpeakers.set(roomId, { socketId: socket.id, speakerName, lockedAt: now });
+      console.log(`🔓 Speaker lock acquired: ${speakerName} in room ${roomId}`);
+
+      console.log(`🎤 Audio chunk | Speaker: ${speakerName} | Room: ${roomId} | Size: ${audio ? audio.length : 0} chars`);
 
       // Convert base64 audio to file
       if (!audio || !audio.includes(',')) {
         console.log(`❌ Invalid audio data format`);
+        activeSpeakers.delete(roomId);
         return;
       }
 
       const buffer = Buffer.from(audio.split(",")[1], "base64");
+
+      // Reject suspiciously small buffers (pure silence / codec header only)
+      if (buffer.length < 1000) {
+        console.log(`⚠️ Buffer too small (${buffer.length}B), skipping`);
+        activeSpeakers.delete(roomId);
+        return;
+      }
+
       const tempFilePath = path.join(TEMP_DIR, `vm_temp_${socket.id}_${Date.now()}.wav`);
       fs.writeFileSync(tempFilePath, buffer);
-      console.log(`✅ Audio file created: ${tempFilePath} (${buffer.length} bytes)`);
 
-      // Transcribe audio using Whisper
-      console.log(`🎙️ Sending to Groq Whisper for transcription...`);
-      console.log(`   File: ${tempFilePath}`);
-      console.log(`   Size: ${buffer.length} bytes`);
-      
+      // Transcribe
       let text;
       try {
         const transcription = await groq.audio.transcriptions.create({
@@ -294,26 +308,36 @@ io.on("connection", socket => {
           model: "whisper-large-v3",
           response_format: "json"
         });
-
-        text = transcription.text;
+        text = transcription.text?.trim();
         console.log(`📝 Transcribed: "${text}"`);
 
-        // Skip if transcription is empty or too short
-        if (!text || text.trim().length < 3) {
-          console.log(`⚠️ Skipping - transcription too short or empty`);
+        if (!text || text.length < 2) {
+          console.log(`⚠️ Empty/too-short transcription, skipping`);
           fs.unlinkSync(tempFilePath);
+          activeSpeakers.delete(roomId);
+          return;
+        }
+
+        // Filter Whisper hallucinations — common silence artifacts
+        const HALLUCINATIONS = [
+          /^(thank you|thanks|you|bye|goodbye|\.+|,+|\s+)$/i,
+          /^\[.*\]$/, // e.g. [Music], [Applause]
+          /^(um+|uh+|hmm+|ah+)$/i
+        ];
+        if (HALLUCINATIONS.some(re => re.test(text))) {
+          console.log(`🚫 Hallucination filtered: "${text}"`);
+          fs.unlinkSync(tempFilePath);
+          activeSpeakers.delete(roomId);
           return;
         }
       } catch (transcriptionError) {
         console.error(`❌ Transcription failed:`, transcriptionError.message);
-        if (transcriptionError.error) {
-          console.error(`   Details:`, transcriptionError.error);
-        }
-        fs.unlinkSync(tempFilePath);
+        try { fs.unlinkSync(tempFilePath); } catch (e) {}
+        activeSpeakers.delete(roomId);
         return;
       }
 
-      // Get language names
+      // Language map
       const languageNames = {
         'en': 'English', 'es': 'Spanish', 'fr': 'French', 'de': 'German',
         'it': 'Italian', 'pt': 'Portuguese', 'ru': 'Russian', 'ja': 'Japanese',
@@ -321,61 +345,47 @@ io.on("connection", socket => {
         'tr': 'Turkish', 'nl': 'Dutch', 'pl': 'Polish'
       };
 
-      // Group participants by their translation language
+      // Group other participants by their preferred translation language
       const participantsByLanguage = new Map();
-      
-      const otherParticipants = room.participants.filter(p => p.id !== socket.id);
-      console.log(`\n👥 Other participants (excluding speaker): ${otherParticipants.length}`);
-      
-      otherParticipants.forEach(participant => {
-        const lang = participant.translationLanguage || 'en';
-        console.log(`   - ${participant.name}: wants ${lang} (${languageNames[lang]})`);
-        
-        if (!participantsByLanguage.has(lang)) {
-          participantsByLanguage.set(lang, []);
-        }
-        participantsByLanguage.get(lang).push(participant);
-      });
+      room.participants
+        .filter(p => p.id !== socket.id)
+        .forEach(participant => {
+          const lang = participant.translationLanguage || 'en';
+          if (!participantsByLanguage.has(lang)) participantsByLanguage.set(lang, []);
+          participantsByLanguage.get(lang).push(participant);
+        });
 
       if (participantsByLanguage.size === 0) {
-        console.log(`⚠️ No other participants to send translations to`);
+        console.log(`⚠️ No other participants to translate for`);
         fs.unlinkSync(tempFilePath);
+        activeSpeakers.delete(roomId);
         return;
       }
 
-      console.log(`\n🌐 Translation plan:`);
-      participantsByLanguage.forEach((participants, lang) => {
-        console.log(`   ${languageNames[lang]}: ${participants.map(p => p.name).join(', ')}`);
-      });
-
-      // Translate once per language and send to all participants who need that language
+      // Translate once per unique target language, send to all who need it
       const translationPromises = Array.from(participantsByLanguage.entries()).map(async ([targetLang, participants]) => {
         try {
           const targetLangName = languageNames[targetLang] || 'English';
-          
-          console.log(`\n🔄 Translating to ${targetLangName}...`);
-          
+          console.log(`🔄 Translating to ${targetLangName}...`);
+
           const translation = await groq.chat.completions.create({
             model: "llama-3.3-70b-versatile",
             messages: [
-              { 
-                role: "system", 
-                content: `You are a professional translator. Translate the given text to ${targetLangName}. Only provide the translation, no explanations.` 
+              {
+                role: "system",
+                content: `You are a professional real-time interpreter. Translate the following speech to ${targetLangName}. Output only the translation, nothing else.`
               },
-              { 
-                role: "user", 
-                content: text 
-              }
+              { role: "user", content: text }
             ],
-            temperature: 0.3,
-            max_tokens: 1024
+            temperature: 0.2,
+            max_tokens: 512
           });
 
-          const translatedText = translation.choices[0].message.content;
-          console.log(`✅ Translated to ${targetLangName}: "${translatedText}"`);
-          
-          // Send to all participants who need this language
-          let sentCount = 0;
+          const translatedText = translation.choices[0].message.content?.trim();
+          if (!translatedText) return;
+
+          console.log(`✅ → ${targetLangName}: "${translatedText}"`);
+
           participants.forEach(participant => {
             const participantSocket = io.sockets.sockets.get(participant.id);
             if (participantSocket) {
@@ -384,30 +394,29 @@ io.on("connection", socket => {
                 translated: translatedText,
                 targetLanguage: targetLang,
                 targetLanguageName: targetLangName,
-                speakerName: speakerName
+                speakerName
               });
-              sentCount++;
-              console.log(`   📤 Sent to ${participant.name} (${participant.id})`);
-            } else {
-              console.log(`   ⚠️ Socket not found for ${participant.name} (${participant.id})`);
             }
-          });          
-          console.log(`✅ Sent ${targetLangName} translation to ${sentCount}/${participants.length} participants`);
+          });
         } catch (err) {
-          console.error(`❌ Error translating to ${targetLang}:`, err.message);
+          console.error(`❌ Translation error for ${targetLang}:`, err.message);
         }
       });
 
       await Promise.all(translationPromises);
-
-      // Delete temp file
       fs.unlinkSync(tempFilePath);
-      console.log(`\n✅ CONTINUOUS AUDIO PROCESSING COMPLETE`);
-      console.log(`${'='.repeat(60)}\n`);
+
+      // Release speaker lock
+      activeSpeakers.delete(roomId);
+      console.log(`🔓 Speaker lock released: ${speakerName}`);
 
     } catch (err) {
-      console.error("❌ Error processing continuous audio:", err);
-      console.error("   Stack:", err.stack);
+      console.error("❌ Error processing continuous audio:", err.message);
+      // Always release lock on error
+      try {
+        const { roomId } = audioData || {};
+        if (roomId) activeSpeakers.delete(roomId);
+      } catch (e) {}
     }
   });
 
@@ -432,8 +441,6 @@ io.on("connection", socket => {
     const existingParticipant = room.participants.find(p => p.id === socket.id);
     if (existingParticipant) {
       console.log(`⚠️ User ${socket.id} already in room ${roomId}, sending existing room state`);
-      
-      // Send existing room state
       const existingParticipants = room.participants.filter(p => p.id !== socket.id);
       socket.emit('room-joined', {
         room: {
@@ -448,12 +455,30 @@ io.on("connection", socket => {
       });
       return;
     }
-    
-    // Check for duplicate names (different socket, same name)
-    const duplicateName = room.participants.find(p => p.name === participantName && p.id !== socket.id);
-    if (duplicateName) {
-      console.log(`⚠️ Duplicate name ${participantName} detected in room ${roomId}`);
-      socket.emit('error', `Name "${participantName}" is already taken in this room`);
+
+    // Check for reconnect by name — update socket ID instead of rejecting
+    const reconnecting = room.participants.find(p => p.name === participantName && p.email === participantEmail && p.id !== socket.id);
+    if (reconnecting) {
+      console.log(`🔄 Participant ${participantName} reconnecting — updating socket ID from ${reconnecting.id} to ${socket.id}`);
+      const oldId = reconnecting.id;
+      reconnecting.id = socket.id;
+      if (room.adminId === oldId) room.adminId = socket.id;
+      userSockets.delete(oldId);
+      userSockets.set(socket.id, { roomId, participant: reconnecting });
+      socket.join(roomId);
+      const existingParticipants = room.participants.filter(p => p.id !== socket.id);
+      socket.emit('room-joined', {
+        room: {
+          id: room.id,
+          creatorName: room.creatorName,
+          adminId: room.adminId,
+          participants: existingParticipants,
+          chatMessages: room.chatMessages || [],
+          raisedHands: room.raisedHands || []
+        },
+        isAdmin: reconnecting.isAdmin
+      });
+      socket.to(roomId).emit('user-joined', reconnecting);
       return;
     }
     
@@ -775,6 +800,14 @@ io.on("connection", socket => {
       files.filter(f => f.startsWith(`vm_temp_${socket.id}`) && f.endsWith('.wav'))
            .forEach(f => { try { fs.unlinkSync(path.join(TEMP_DIR, f)); } catch (e) {} });
     } catch (e) {}
+
+    // Release speaker lock if this socket held it
+    activeSpeakers.forEach((value, roomId) => {
+      if (value.socketId === socket.id) {
+        activeSpeakers.delete(roomId);
+        console.log(`🔓 Speaker lock released on disconnect for room ${roomId}`);
+      }
+    });
     
     const userInfo = userSockets.get(socket.id);
     if (userInfo) {

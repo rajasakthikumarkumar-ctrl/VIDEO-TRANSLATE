@@ -51,10 +51,51 @@ function VideoCall() {
     ttsEnabledRef.current = ttsEnabled;
   }, [ttsEnabled]);
 
-  // Speak translated text using browser SpeechSynthesis
+  // TTS queue — prevents skipping/overlapping, handles autoplay restrictions
+  const ttsQueueRef = useRef([]);
+  const ttsSpeakingRef = useRef(false);
+
+  const processTtsQueue = useCallback(() => {
+    if (ttsSpeakingRef.current || ttsQueueRef.current.length === 0) return;
+    if (!window.speechSynthesis) return;
+
+    const { text, lang } = ttsQueueRef.current.shift();
+    ttsSpeakingRef.current = true;
+
+    // Chrome bug: speechSynthesis pauses after ~14s — keep it alive
+    const keepAlive = setInterval(() => {
+      if (window.speechSynthesis.speaking) {
+        window.speechSynthesis.pause();
+        window.speechSynthesis.resume();
+      }
+    }, 10000);
+
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = lang;
+    utterance.rate = 1.05;
+    utterance.pitch = 1.0;
+    utterance.volume = 1.0;
+
+    utterance.onend = () => {
+      clearInterval(keepAlive);
+      ttsSpeakingRef.current = false;
+      // Process next item after a tiny gap
+      setTimeout(processTtsQueue, 80);
+    };
+    utterance.onerror = (e) => {
+      clearInterval(keepAlive);
+      console.warn('TTS error:', e.error);
+      ttsSpeakingRef.current = false;
+      setTimeout(processTtsQueue, 80);
+    };
+
+    window.speechSynthesis.speak(utterance);
+    console.log(`🔊 TTS [${lang}]: "${text}"`);
+  }, []);
+
+  // Speak translated text using browser SpeechSynthesis with queue
   const speakText = useCallback((text, langCode) => {
     if (!window.speechSynthesis) return;
-    // Map language codes to BCP-47 tags for SpeechSynthesis
     const langMap = {
       'en': 'en-US', 'es': 'es-ES', 'fr': 'fr-FR', 'de': 'de-DE',
       'it': 'it-IT', 'pt': 'pt-PT', 'ru': 'ru-RU', 'ja': 'ja-JP',
@@ -62,15 +103,14 @@ function VideoCall() {
       'tr': 'tr-TR', 'nl': 'nl-NL', 'pl': 'pl-PL'
     };
     const lang = langMap[langCode] || langCode || 'en-US';
-    window.speechSynthesis.cancel(); // stop any ongoing speech
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = lang;
-    utterance.rate = 1.0;
-    utterance.pitch = 1.0;
-    utterance.volume = 1.0;
-    window.speechSynthesis.speak(utterance);
-    console.log(`🔊 Speaking in ${lang}: "${text}"`);
-  }, []);
+
+    // Keep queue short — drop oldest if backed up (> 3 items means we're behind)
+    if (ttsQueueRef.current.length >= 3) {
+      ttsQueueRef.current.shift();
+    }
+    ttsQueueRef.current.push({ text, lang });
+    processTtsQueue();
+  }, [processTtsQueue]);
   const [isRecording, setIsRecording] = useState(false);
   const [recordingType, setRecordingType] = useState('both'); // 'video', 'audio', 'both'
   const [recordedChunks, setRecordedChunks] = useState([]);
@@ -147,8 +187,10 @@ function VideoCall() {
         transports: ['websocket', 'polling'],
         timeout: 20000,
         reconnection: true,
-        reconnectionAttempts: 5,
-        reconnectionDelay: 1000
+        reconnectionAttempts: 10,
+        reconnectionDelay: 1000,
+        reconnectionDelayMax: 5000,
+        randomizationFactor: 0.3
       });
       
       // Get user media with enhanced audio settings
@@ -490,6 +532,11 @@ function VideoCall() {
       alert(`Translation failed: ${error.error}`);
     });
 
+    socket.on('speaker-busy', ({ activeSpeaker }) => {
+      console.log(`🔒 Speaker busy: ${activeSpeaker} is currently speaking`);
+      setTranslationStatus(`🔒 ${activeSpeaker} is speaking...`);
+    });
+
     socket.on('error', (message) => {
       console.error('❌ Socket error:', message);
       setError(message);
@@ -497,13 +544,29 @@ function VideoCall() {
     });
 
     socket.on('connect', () => {
-      console.log('🔗 Socket connected');
+      console.log('🔗 Socket connected:', socket.id);
       setConnectionStatus('Connected');
     });
 
-    socket.on('disconnect', () => {
-      console.log('🔌 Socket disconnected');
-      setConnectionStatus('Disconnected');
+    socket.on('reconnect', (attempt) => {
+      console.log(`🔄 Socket reconnected after ${attempt} attempts — re-joining room`);
+      setConnectionStatus('Reconnected');
+      const { participantName, participantEmail, passcode, isHost, translationLanguage: userLang } = location.state || {};
+      if (participantName && passcode) {
+        socket.emit('join-room', {
+          roomId,
+          passcode,
+          participantName,
+          participantEmail,
+          isHost: isHost || false,
+          translationLanguage: userLang || 'en'
+        });
+      }
+    });
+
+    socket.on('disconnect', (reason) => {
+      console.log('🔌 Socket disconnected:', reason);
+      setConnectionStatus('Disconnected — reconnecting...');
     });
   };
 
@@ -515,160 +578,123 @@ function VideoCall() {
       console.log(`⚠️ Peer connection already exists for ${peerId}, skipping`);
       return;
     }
-    
-    // Enhanced ICE servers with TURN servers for better connectivity
+
+    // ICE servers — Google STUN + reliable free TURN via Metered
     const iceServers = [
-      // Google STUN servers
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
       { urls: 'stun:stun2.l.google.com:19302' },
       { urls: 'stun:stun3.l.google.com:19302' },
       { urls: 'stun:stun4.l.google.com:19302' },
-      
-      // Additional STUN servers for redundancy
-      { urls: 'stun:stun.stunprotocol.org:3478' },
-      { urls: 'stun:stun.voiparound.com' },
-      { urls: 'stun:stun.voipbuster.com' },
-      
-      // Free TURN servers (you should replace with your own for production)
-      {
-        urls: 'turn:openrelay.metered.ca:80',
-        username: 'openrelayproject',
-        credential: 'openrelayproject'
-      },
-      {
-        urls: 'turn:openrelay.metered.ca:443',
-        username: 'openrelayproject',
-        credential: 'openrelayproject'
-      },
-      {
-        urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-        username: 'openrelayproject',
-        credential: 'openrelayproject'
-      }
+      // Metered free TURN — works across NAT/firewalls on Render
+      { urls: 'turn:a.relay.metered.ca:80',      username: 'openrelayproject', credential: 'openrelayproject' },
+      { urls: 'turn:a.relay.metered.ca:80?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+      { urls: 'turn:a.relay.metered.ca:443',     username: 'openrelayproject', credential: 'openrelayproject' },
+      { urls: 'turn:a.relay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+      // Fallback TURN
+      { urls: 'turn:openrelay.metered.ca:80',    username: 'openrelayproject', credential: 'openrelayproject' },
+      { urls: 'turn:openrelay.metered.ca:443',   username: 'openrelayproject', credential: 'openrelayproject' },
+      { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
     ];
     
     const peer = new RTCPeerConnection({
       iceServers,
-      iceCandidatePoolSize: 10, // Pre-gather ICE candidates
-      iceTransportPolicy: 'all', // Use both STUN and TURN
-      bundlePolicy: 'max-bundle', // Bundle media for better performance
-      rtcpMuxPolicy: 'require' // Multiplex RTP and RTCP
+      iceCandidatePoolSize: 10,
+      iceTransportPolicy: 'all',
+      bundlePolicy: 'max-bundle',
+      rtcpMuxPolicy: 'require'
     });
 
-    // Add local stream tracks with optimized settings
+    // Buffer ICE candidates until remote description is set
+    peer._iceCandidateBuffer = [];
+    peer._remoteDescSet = false;
+
+    // Add local stream tracks
     const currentStream = isScreenSharing ? screenStreamRef.current : localStreamRef.current;
     if (currentStream) {
       currentStream.getTracks().forEach(track => {
-        // Configure track settings for better quality
         if (track.kind === 'audio') {
-          // Apply audio constraints for better quality
           track.applyConstraints({
             echoCancellation: true,
             noiseSuppression: true,
             autoGainControl: true,
             sampleRate: 48000,
             channelCount: 1
-          }).catch(err => console.log('Audio constraints not applied:', err));
+          }).catch(() => {});
         }
-        
         peer.addTrack(track, currentStream);
-        console.log(`➕ Added ${track.kind} track to peer connection for ${peerId}`);
+        console.log(`➕ Added ${track.kind} track to peer for ${peerId}`);
       });
     }
 
-    // Handle remote stream with connection status tracking
     peer.ontrack = (event) => {
-      console.log(`📺 Received remote stream from ${peerId}:`, event.streams[0]);
+      console.log(`📺 Received remote stream from ${peerId}`);
       const [remoteStream] = event.streams;
-      
       setRemoteStreams(prev => {
-        const newStreams = new Map(prev);
-        newStreams.set(peerId, remoteStream);
-        console.log(`💾 Stored remote stream for ${peerId}. Total streams:`, newStreams.size);
-        return newStreams;
+        const m = new Map(prev);
+        m.set(peerId, remoteStream);
+        return m;
       });
-      
-      // Update connection status for this peer
-      setParticipants(prev => prev.map(p => 
+      setParticipants(prev => prev.map(p =>
         p.id === peerId ? { ...p, connectionStatus: 'connected' } : p
       ));
     };
 
-    // Enhanced ICE candidate handling with immediate sending
     peer.onicecandidate = (event) => {
       if (event.candidate) {
-        console.log(`🧊 Sending ICE candidate to ${peerId}:`, event.candidate.type);
-        socketRef.current.emit('ice-candidate', {
-          candidate: event.candidate,
-          targetId: peerId
-        });
-      } else {
-        console.log(`🧊 ICE gathering complete for ${peerId}`);
+        socketRef.current.emit('ice-candidate', { candidate: event.candidate, targetId: peerId });
       }
     };
 
-    // Enhanced connection state monitoring
     peer.onconnectionstatechange = () => {
       const state = peer.connectionState;
       console.log(`🔄 Connection state for ${peerId}: ${state}`);
-      
-      // Update participant connection status
-      setParticipants(prev => prev.map(p => 
+      setParticipants(prev => prev.map(p =>
         p.id === peerId ? { ...p, connectionStatus: state } : p
       ));
-      
-      if (state === 'connected') {
-        console.log(`✅ Peer connection established with ${peerId}`);
-      } else if (state === 'failed' || state === 'disconnected') {
-        console.log(`❌ Peer connection failed for ${peerId}, attempting reconnection`);
-        // Attempt reconnection after a delay
+
+      if (state === 'failed') {
+        console.log(`❌ Connection failed for ${peerId} — attempting ICE restart`);
+        // Try ICE restart first before full reconnect
+        if (shouldCreateOffer) {
+          peer.restartIce();
+          createOffer(peerId);
+        } else {
+          // Give the other side 3s to restart, then do full reconnect
+          setTimeout(() => {
+            if (peer.connectionState === 'failed' && peersRef.current.has(peerId)) {
+              console.log(`🔄 Full reconnect for ${peerId}`);
+              peer.close();
+              peersRef.current.delete(peerId);
+              setRemoteStreams(prev => { const m = new Map(prev); m.delete(peerId); return m; });
+              createPeerConnection(peerId, participant, true);
+            }
+          }, 3000);
+        }
+      } else if (state === 'disconnected') {
+        // Transient — wait before acting
         setTimeout(() => {
-          if (peersRef.current.has(peerId)) {
-            console.log(`🔄 Attempting to reconnect to ${peerId}`);
-            peersRef.current.delete(peerId);
-            setRemoteStreams(prev => {
-              const newStreams = new Map(prev);
-              newStreams.delete(peerId);
-              return newStreams;
-            });
-            // Recreate connection
-            createPeerConnection(peerId, participant, true);
+          if (peer.connectionState === 'disconnected' && peersRef.current.has(peerId)) {
+            peer.restartIce();
           }
-        }, 3000);
+        }, 2000);
       }
     };
 
     peer.oniceconnectionstatechange = () => {
-      const iceState = peer.iceConnectionState;
-      console.log(`🧊 ICE connection state for ${peerId}: ${iceState}`);
-      
-      if (iceState === 'connected' || iceState === 'completed') {
-        console.log(`✅ ICE connection established with ${peerId}`);
-      } else if (iceState === 'failed') {
-        console.log(`❌ ICE connection failed for ${peerId}`);
+      console.log(`🧊 ICE state for ${peerId}: ${peer.iceConnectionState}`);
+      if (peer.iceConnectionState === 'failed') {
+        peer.restartIce();
       }
     };
 
-    // Monitor ICE gathering state
-    peer.onicegatheringstatechange = () => {
-      console.log(`🧊 ICE gathering state for ${peerId}: ${peer.iceGatheringState}`);
-    };
-
-    // Store peer connection
     peersRef.current.set(peerId, peer);
-
-    // Set initial connection status
-    setParticipants(prev => prev.map(p => 
+    setParticipants(prev => prev.map(p =>
       p.id === peerId ? { ...p, connectionStatus: 'connecting' } : p
     ));
 
-    // Create offer if we should initiate
     if (shouldCreateOffer) {
-      // Add a small delay to ensure ICE gathering starts
-      setTimeout(() => {
-        createOffer(peerId);
-      }, 100);
+      setTimeout(() => createOffer(peerId), 100);
     }
   };
 
@@ -676,50 +702,42 @@ function VideoCall() {
     try {
       const peer = peersRef.current.get(peerId);
       if (!peer) return;
-
       console.log(`📤 Creating offer for ${peerId}`);
-      const offer = await peer.createOffer();
+      const offer = await peer.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
       await peer.setLocalDescription(offer);
-      
-      socketRef.current.emit('offer', {
-        offer: offer,
-        targetId: peerId
-      });
-      
-      console.log(`📤 Offer sent to ${peerId}`);
+      socketRef.current.emit('offer', { offer, targetId: peerId });
     } catch (error) {
       console.error(`❌ Error creating offer for ${peerId}:`, error);
     }
   };
 
+  // Flush buffered ICE candidates after remote description is set
+  const flushIceCandidates = async (peer, peerId) => {
+    peer._remoteDescSet = true;
+    const buffered = peer._iceCandidateBuffer || [];
+    console.log(`🧊 Flushing ${buffered.length} buffered ICE candidates for ${peerId}`);
+    for (const candidate of buffered) {
+      try { await peer.addIceCandidate(new RTCIceCandidate(candidate)); } catch (e) {}
+    }
+    peer._iceCandidateBuffer = [];
+  };
+
   const handleOffer = async (offer, senderId) => {
     try {
       let peer = peersRef.current.get(senderId);
-      
-      // Create peer connection if it doesn't exist
       if (!peer) {
-        console.log(`🔗 Creating peer connection for incoming offer from ${senderId}`);
         const participant = participants.find(p => p.id === senderId) || { id: senderId, name: 'Unknown' };
         createPeerConnection(senderId, participant, false);
         peer = peersRef.current.get(senderId);
       }
+      if (!peer) return;
 
-      if (!peer) {
-        console.error(`❌ No peer connection found for ${senderId}`);
-        return;
-      }
-
-      console.log(`📥 Processing offer from ${senderId}`);
       await peer.setRemoteDescription(new RTCSessionDescription(offer));
-      
+      await flushIceCandidates(peer, senderId);
+
       const answer = await peer.createAnswer();
       await peer.setLocalDescription(answer);
-      
-      socketRef.current.emit('answer', {
-        answer: answer,
-        targetId: senderId
-      });
-      
+      socketRef.current.emit('answer', { answer, targetId: senderId });
       console.log(`📤 Answer sent to ${senderId}`);
     } catch (error) {
       console.error(`❌ Error handling offer from ${senderId}:`, error);
@@ -729,13 +747,9 @@ function VideoCall() {
   const handleAnswer = async (answer, senderId) => {
     try {
       const peer = peersRef.current.get(senderId);
-      if (!peer) {
-        console.error(`❌ No peer connection found for ${senderId}`);
-        return;
-      }
-
-      console.log(`📥 Processing answer from ${senderId}`);
+      if (!peer) return;
       await peer.setRemoteDescription(new RTCSessionDescription(answer));
+      await flushIceCandidates(peer, senderId);
       console.log(`✅ Answer processed from ${senderId}`);
     } catch (error) {
       console.error(`❌ Error handling answer from ${senderId}:`, error);
@@ -745,13 +759,17 @@ function VideoCall() {
   const handleIceCandidate = async (candidate, senderId) => {
     try {
       const peer = peersRef.current.get(senderId);
-      if (!peer) {
-        console.error(`❌ No peer connection found for ${senderId}`);
+      if (!peer) return;
+
+      // Buffer candidates until remote description is ready
+      if (!peer._remoteDescSet) {
+        peer._iceCandidateBuffer = peer._iceCandidateBuffer || [];
+        peer._iceCandidateBuffer.push(candidate);
+        console.log(`🧊 Buffered ICE candidate for ${senderId} (remote desc not set yet)`);
         return;
       }
 
       await peer.addIceCandidate(new RTCIceCandidate(candidate));
-      console.log(`✅ ICE candidate added for ${senderId}`);
     } catch (error) {
       console.error(`❌ Error adding ICE candidate from ${senderId}:`, error);
     }
@@ -895,7 +913,8 @@ function VideoCall() {
 
   // Translation functions
   
-  // Continuous translation - automatically captures and translates speech
+  // Continuous translation — VAD-driven smart chunking
+  // Flow: monitor RMS → speech starts → record → silence gap → send chunk → repeat
   const startContinuousTranslation = useCallback(async () => {
     try {
       if (!localStreamRef.current) {
@@ -911,7 +930,7 @@ function VideoCall() {
         return;
       }
 
-      console.log('🎤 Starting continuous translation...');
+      console.log('🎤 Starting VAD-driven continuous translation...');
       setTranslationEnabled(true);
 
       const audioTrack = localStreamRef.current.getAudioTracks()[0];
@@ -924,114 +943,160 @@ function VideoCall() {
       const participantName = location.state?.participantName || 'Unknown';
       let isRunning = true;
 
-      // --- Speech detection via Web Audio API ---
+      // ── Web Audio API setup ──────────────────────────────────────────────
       const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-      const audioStream = new MediaStream([audioTrack]);
-      const sourceNode = audioContext.createMediaStreamSource(audioStream);
-      const analyser = audioContext.createAnalyser();
-      analyser.fftSize = 2048;
-      sourceNode.connect(analyser);
-      const dataArray = new Float32Array(analyser.fftSize);
 
-      // Returns RMS energy of current audio frame (0.0 – 1.0)
+      // Resume AudioContext if suspended (browser autoplay policy)
+      if (audioContext.state === 'suspended') {
+        await audioContext.resume();
+        console.log('▶️ AudioContext resumed');
+      }
+      const micStream = new MediaStream([audioTrack]);
+      const sourceNode = audioContext.createMediaStreamSource(micStream);
+
+      // High-pass filter at 80 Hz — removes low-frequency hum/rumble
+      const highPass = audioContext.createBiquadFilter();
+      highPass.type = 'highpass';
+      highPass.frequency.value = 80;
+
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0.3;
+      sourceNode.connect(highPass);
+      highPass.connect(analyser);
+
+      const pcmBuffer = new Float32Array(analyser.fftSize);
+
       const getRMS = () => {
-        analyser.getFloatTimeDomainData(dataArray);
+        analyser.getFloatTimeDomainData(pcmBuffer);
         let sum = 0;
-        for (let i = 0; i < dataArray.length; i++) sum += dataArray[i] * dataArray[i];
-        return Math.sqrt(sum / dataArray.length);
+        for (let i = 0; i < pcmBuffer.length; i++) sum += pcmBuffer[i] * pcmBuffer[i];
+        return Math.sqrt(sum / pcmBuffer.length);
       };
 
-      // Sample RMS over the recording window to decide if speech was present
-      const SPEECH_THRESHOLD = 0.015; // tune: raise if too sensitive, lower if missing speech
-      const SAMPLE_INTERVAL_MS = 100;
+      // ── Tuning constants ─────────────────────────────────────────────────
+      const SPEECH_THRESHOLD  = 0.012; // RMS above this = speech
+      const SILENCE_THRESHOLD = 0.008; // RMS below this = silence
+      const SILENCE_GAP_MS    = 800;   // ms of silence before we cut the chunk
+      const MAX_CHUNK_MS      = 8000;  // hard cap — send even if still speaking
+      const MIN_CHUNK_MS      = 400;   // ignore chunks shorter than this
+      const VAD_POLL_MS       = 80;    // how often we sample RMS
 
-      // Recursive function: record for 5s, check energy, send if speech detected
-      const recordAndSend = () => {
-        if (!isRunning || !continuousRecorderRef.current) return;
+      // ── VAD state machine ────────────────────────────────────────────────
+      const mimeType = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus']
+        .find(m => MediaRecorder.isTypeSupported(m)) || 'audio/webm';
 
+      let recorder = null;
+      let chunks = [];
+      let speechStartTime = 0;
+      let silenceStartTime = 0;
+      let isSpeaking = false;
+
+      const sendChunk = () => {
+        if (!recorder || recorder.state !== 'recording') return;
+        recorder.stop(); // onstop will handle sending
+      };
+
+      const startRecording = () => {
+        chunks = [];
+        speechStartTime = Date.now();
         const recStream = new MediaStream([audioTrack]);
-        const mimeType = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus']
-          .find(m => MediaRecorder.isTypeSupported(m)) || 'audio/webm';
-
-        const recorder = new MediaRecorder(recStream, { mimeType });
-        const chunks = [];
-        let maxRms = 0;
-
-        // Sample audio energy while recording
-        const energySampler = setInterval(() => {
-          const rms = getRMS();
-          if (rms > maxRms) maxRms = rms;
-        }, SAMPLE_INTERVAL_MS);
+        recorder = new MediaRecorder(recStream, { mimeType, audioBitsPerSecond: 32000 });
 
         recorder.ondataavailable = (e) => {
           if (e.data && e.data.size > 0) chunks.push(e.data);
         };
 
         recorder.onstop = () => {
-          clearInterval(energySampler);
           if (!isRunning) return;
-
-          const blob = new Blob(chunks, { type: mimeType });
-          console.log(`📊 Audio blob: ${blob.size} bytes | maxRMS: ${maxRms.toFixed(4)}`);
-
-          const hasSpeech = maxRms >= SPEECH_THRESHOLD;
-
-          if (!hasSpeech) {
-            console.log(`🔇 Silence (RMS ${maxRms.toFixed(4)} < ${SPEECH_THRESHOLD}), skipping`);
-            setTranslationStatus('🔇 Silence — listening...');
-            setTimeout(() => {
-              if (isRunning) { setTranslationStatus('🎤 Listening...'); recordAndSend(); }
-            }, 300);
+          const duration = Date.now() - speechStartTime;
+          if (duration < MIN_CHUNK_MS) {
+            console.log(`⚡ Chunk too short (${duration}ms), discarding`);
             return;
           }
+          const blob = new Blob(chunks, { type: mimeType });
+          console.log(`📦 Sending chunk: ${blob.size}B, ${duration}ms`);
+          setTranslationStatus('🗣️ Processing speech...');
 
-          setTranslationStatus('🗣️ Speech detected — sending...');
           const reader = new FileReader();
           reader.readAsDataURL(blob);
           reader.onloadend = () => {
-            if (!isRunning) return;
-            if (socketRef.current?.connected) {
-              socketRef.current.emit('continuous-audio', {
-                audio: reader.result,
-                roomId,
-                speakerName: participantName
-              });
-              console.log('✅ Audio sent to server');
-              setTranslationStatus('✅ Sent — listening...');
-            }
-            setTimeout(() => {
-              if (isRunning) { setTranslationStatus('🎤 Listening...'); recordAndSend(); }
-            }, 300);
+            if (!isRunning || !socketRef.current?.connected) return;
+            socketRef.current.emit('continuous-audio', {
+              audio: reader.result,
+              roomId,
+              speakerName: participantName
+            });
+            setTranslationStatus('✅ Sent — listening...');
           };
         };
 
-        recorder.onerror = (e) => {
-          clearInterval(energySampler);
-          console.error('❌ Recorder error:', e.error);
-          setTimeout(() => { if (isRunning) recordAndSend(); }, 1000);
-        };
-
-        continuousRecorderRef.current.recorder = recorder;
-        recorder.start();
-        setTranslationStatus('🎤 Listening...');
-        console.log('🎙️ Recording started, will stop in 5s...');
-
-        setTimeout(() => {
-          if (recorder.state === 'recording') recorder.stop();
-        }, 5000);
+        recorder.onerror = (e) => console.error('❌ Recorder error:', e.error);
+        recorder.start(200); // collect data every 200ms for smooth streaming
+        console.log('🎙️ Recording started');
       };
 
-      // Initialize ref with stop control (also closes AudioContext on stop)
+      // ── VAD polling loop ─────────────────────────────────────────────────
+      const vadInterval = setInterval(() => {
+        if (!isRunning) return;
+
+        const rms = getRMS();
+
+        if (!isSpeaking) {
+          if (rms >= SPEECH_THRESHOLD) {
+            // Speech onset
+            isSpeaking = true;
+            silenceStartTime = 0;
+            setTranslationStatus('🎤 Speaking...');
+            console.log(`🗣️ Speech onset (RMS ${rms.toFixed(4)})`);
+            startRecording();
+          } else {
+            setTranslationStatus('🔇 Listening...');
+          }
+        } else {
+          // Currently speaking
+          const elapsed = Date.now() - speechStartTime;
+
+          if (rms < SILENCE_THRESHOLD) {
+            if (silenceStartTime === 0) silenceStartTime = Date.now();
+            const silenceDuration = Date.now() - silenceStartTime;
+
+            if (silenceDuration >= SILENCE_GAP_MS) {
+              // Silence gap reached — cut the chunk
+              isSpeaking = false;
+              silenceStartTime = 0;
+              console.log(`🔇 Silence gap (${silenceDuration}ms), cutting chunk`);
+              sendChunk();
+            }
+          } else {
+            // Still speaking — reset silence timer
+            silenceStartTime = 0;
+
+            if (elapsed >= MAX_CHUNK_MS) {
+              // Hard cap reached — send and restart immediately
+              console.log(`⏱️ Max chunk duration reached (${elapsed}ms), splitting`);
+              sendChunk();
+              // Brief pause then restart recording
+              setTimeout(() => {
+                if (isRunning && isSpeaking) startRecording();
+              }, 100);
+            }
+          }
+        }
+      }, VAD_POLL_MS);
+
+      // Store stop handle
       continuousRecorderRef.current = {
         recorder: null,
         stop: () => {
           isRunning = false;
+          clearInterval(vadInterval);
+          if (recorder && recorder.state === 'recording') recorder.stop();
           try { audioContext.close(); } catch (e) {}
         }
       };
 
-      recordAndSend();
-      console.log('✅ Continuous translation loop started');
+      console.log('✅ VAD translation loop started');
 
     } catch (error) {
       console.error('❌ Error starting continuous translation:', error);
@@ -1043,9 +1108,8 @@ function VideoCall() {
   const stopContinuousTranslation = useCallback(() => {
     if (continuousRecorderRef.current) {
       console.log('🛑 Stopping continuous translation...');
-      const { recorder, stop } = continuousRecorderRef.current;
-      if (stop) stop(); // signal the loop to stop
-      if (recorder && recorder.state === 'recording') recorder.stop();
+      const { stop } = continuousRecorderRef.current;
+      if (stop) stop(); // clears VAD interval, stops recorder, closes AudioContext
       continuousRecorderRef.current = null;
       setTranslationEnabled(false);
       setTranslationStatus('');
@@ -1344,8 +1408,12 @@ function VideoCall() {
   const cleanup = () => {
     console.log('🧹 Cleaning up...');
     
-    // Stop any ongoing speech
-    if (window.speechSynthesis) window.speechSynthesis.cancel();
+    // Stop TTS and clear queue
+    if (window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+    ttsQueueRef.current = [];
+    ttsSpeakingRef.current = false;
 
     // Stop continuous translation if active
     if (continuousRecorderRef.current) {
@@ -1672,8 +1740,14 @@ function VideoCall() {
                   <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                     <button
                       onClick={() => {
-                        if (ttsEnabled) window.speechSynthesis.cancel();
-                        setTtsEnabled(v => !v);
+                        const next = !ttsEnabled;
+                        setTtsEnabled(next);
+                        if (!next) {
+                          // Muting — cancel current speech and clear queue
+                          if (window.speechSynthesis) window.speechSynthesis.cancel();
+                          ttsQueueRef.current = [];
+                          ttsSpeakingRef.current = false;
+                        }
                       }}
                       title={ttsEnabled ? 'Mute voice output' : 'Enable voice output'}
                       style={{
