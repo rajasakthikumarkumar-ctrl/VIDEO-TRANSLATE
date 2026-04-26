@@ -81,6 +81,8 @@ const userSockets = new Map();
 // Per-room active speaker lock: roomId → { socketId, lockedAt }
 const activeSpeakers = new Map();
 const SPEAKER_LOCK_TIMEOUT_MS = 12000; // auto-release if server hangs
+// Per-room whiteboard stroke history for late-joiner sync
+const whiteboardState = new Map(); // roomId → stroke[]
 
 // Health check endpoint (keeps Render service alive)
 app.get('/health', (req, res) => {
@@ -661,6 +663,7 @@ io.on("connection", socket => {
     
     // Clean up room
     rooms.delete(roomId);
+    whiteboardState.delete(roomId);
     console.log(`🗑️ Room ${roomId} deleted by admin`);
   });
 
@@ -791,6 +794,41 @@ io.on("connection", socket => {
     }
   });
 
+  // ── Whiteboard ────────────────────────────────────────────────────────────
+
+  // A participant drew a stroke — broadcast to room, persist for late joiners
+  socket.on('wb-draw', ({ roomId, stroke }) => {
+    if (!roomId || !stroke) return;
+    const room = rooms.get(roomId);
+    if (!room) return;
+
+    // Persist stroke
+    if (!whiteboardState.has(roomId)) whiteboardState.set(roomId, []);
+    whiteboardState.get(roomId).push(stroke);
+
+    // Broadcast to everyone else in the room
+    socket.to(roomId).emit('wb-draw', { stroke });
+  });
+
+  // A participant cleared the board
+  socket.on('wb-clear', ({ roomId }) => {
+    if (!roomId) return;
+    const room = rooms.get(roomId);
+    if (!room) return;
+
+    whiteboardState.set(roomId, []);
+    socket.to(roomId).emit('wb-clear');
+    console.log(`🗑️ Whiteboard cleared in room ${roomId} by ${socket.id}`);
+  });
+
+  // A newly joined participant requests the current board state
+  socket.on('wb-state-request', ({ roomId }) => {
+    if (!roomId) return;
+    const strokes = whiteboardState.get(roomId) || [];
+    socket.emit('wb-state-sync', { strokes });
+    console.log(`📋 Sent ${strokes.length} whiteboard strokes to ${socket.id} for room ${roomId}`);
+  });
+
   socket.on("disconnect", () => {
     console.log(`🔌 Client disconnected: ${socket.id}`);
     
@@ -836,6 +874,7 @@ io.on("connection", socket => {
           
           // Delete the room
           rooms.delete(roomId);
+          whiteboardState.delete(roomId);
           console.log(`🗑️ Room ${roomId} deleted - Admin left`);
         } else {
           // Regular participant leaving

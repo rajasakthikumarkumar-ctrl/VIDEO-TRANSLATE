@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { useParams, useLocation, useNavigate } from 'react-router-dom';
 import io from 'socket.io-client';
 import { SOCKET_URL } from '../config';
+import Whiteboard from './Whiteboard';
 import './VideoCall.css';
 
 function VideoCall() {
@@ -1862,17 +1863,13 @@ function VideoCall() {
 
       {/* Whiteboard Modal */}
       {showWhiteboard && (
-        <div className="modal-overlay" onClick={() => setShowWhiteboard(false)}>
-          <div className="whiteboard-modal" onClick={e => e.stopPropagation()}>
-            <div className="modal-header">
-              <h3>Whiteboard</h3>
-              <button onClick={() => setShowWhiteboard(false)}>✕</button>
-            </div>
-            <div className="whiteboard-content">
-              <canvas width="800" height="600" style={{border: '1px solid #ccc', background: 'white'}} />
-              <p>Whiteboard functionality - Coming soon!</p>
-            </div>
-          </div>
+        <div className="wb-modal-overlay" onClick={() => setShowWhiteboard(false)}>
+          <Whiteboard
+            socket={socketRef.current}
+            roomId={roomId}
+            participantName={location.state?.participantName || 'You'}
+            onClose={() => setShowWhiteboard(false)}
+          />
         </div>
       )}
 
