@@ -1,0 +1,74 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# docker-compose.yml  —  EC2 runtime orchestration
+#
+# This file is used ON THE EC2 INSTANCE to pull and run the two images
+# that Jenkins has already built and pushed to AWS ECR.
+#
+# It is NOT used to build the images — that is Jenkins' job.
+#
+# Usage on EC2:
+#   export AWS_ACCOUNT_ID=123456789012
+#   export AWS_REGION=ap-south-1          # change to your region
+#   export IMAGE_TAG=latest               # or a specific git SHA
+#   export GROQ_API_KEY=gsk_...
+#   docker compose up -d
+#
+# All variable values can also be stored in a .env file in this directory
+# (never commit that file — it is in .gitignore).
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Backend ────────────────────────────────────────────────────────────────
+  server:
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/video-meet-server:${IMAGE_TAG:-latest}
+    container_name: video-meet-server
+    restart: unless-stopped
+    ports:
+      - "5001:5001"
+    environment:
+      - NODE_ENV=production
+      - PORT=5001
+      # GROQ_API_KEY is injected from the EC2 shell environment or .env file.
+      # It is never stored in this file or in any Docker image.
+      - GROQ_API_KEY=${GROQ_API_KEY}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:5001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - video-meet-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── Frontend ───────────────────────────────────────────────────────────────
+  client:
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/video-meet-client:${IMAGE_TAG:-latest}
+    container_name: video-meet-client
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      server:
+        condition: service_healthy
+    networks:
+      - video-meet-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# ── Shared network ────────────────────────────────────────────────────────────
+# Both containers are on the same bridge network.
+# The client (nginx) serves static files — it communicates with the server
+# via the EC2 public IP/domain, NOT via the container hostname, because
+# the API calls come from the user's BROWSER, not from inside the container.
+networks:
+  video-meet-net:
+    driver: bridge
