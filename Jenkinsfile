@@ -3,83 +3,108 @@ pipeline {
 
     options {
         timestamps()
-        ansiColor('xterm')
         timeout(time: 30, unit: 'MINUTES')
     }
 
     environment {
-        CLIENT_IMAGE = "video-translate-client:latest"
-        SERVER_IMAGE = "video-translate-server:latest"
+        AWS_REGION = "ap-south-1"
+        AWS_ACCOUNT_ID = "030729259628"
+
+        CLIENT_REPO = "video-translate-client"
+        SERVER_REPO = "video-translate-server"
+
+        CLIENT_IMAGE = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${CLIENT_REPO}:latest"
+        SERVER_IMAGE = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${SERVER_REPO}:latest"
+
+        ECS_CLUSTER = "video-translate-cluster"
+        ECS_SERVICE = "video-translate-task-service"
     }
 
     stages {
 
         stage('Checkout') {
             steps {
-                echo "Checking out source code..."
                 checkout scm
             }
         }
 
-        stage('Validate Client') {
+        stage('Build Client Image') {
             steps {
                 dir('client') {
-                    echo "Validating client package.json..."
-                    sh '''
-                        node -e "JSON.parse(require('fs').readFileSync('package.json','utf8')); console.log('Client package.json OK')"
-                    '''
+                    sh """
+                    docker build -t ${CLIENT_IMAGE} .
+                    """
                 }
             }
         }
 
-        stage('Validate Server') {
+        stage('Build Server Image') {
             steps {
                 dir('server') {
-                    echo "Validating server package.json..."
-                    sh '''
-                        node -e "JSON.parse(require('fs').readFileSync('package.json','utf8')); console.log('Server package.json OK')"
-                    '''
+                    sh """
+                    docker build -t ${SERVER_IMAGE} .
+                    """
                 }
             }
         }
 
-        stage('Build Client Docker Image') {
+        stage('Login to Amazon ECR') {
             steps {
-                dir('client') {
-                    sh '''
-                        docker build -t ${CLIENT_IMAGE} .
-                    '''
+                withCredentials([[
+                    $class: 'AmazonWebServicesCredentialsBinding',
+                    credentialsId: 'aws-creds'
+                ]]) {
+
+                    sh """
+                    aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+                    """
                 }
             }
         }
 
-        stage('Build Server Docker Image') {
+        stage('Push Client Image') {
             steps {
-                dir('server') {
-                    sh '''
-                        docker build -t ${SERVER_IMAGE} .
-                    '''
-                }
+                sh "docker push ${CLIENT_IMAGE}"
             }
         }
 
-        stage('Docker Images') {
+        stage('Push Server Image') {
             steps {
-                sh '''
-                    docker images | grep video-translate || true
-                '''
+                sh "docker push ${SERVER_IMAGE}"
+            }
+        }
+
+        stage('Force ECS Deployment') {
+            steps {
+
+                withCredentials([[
+                    $class: 'AmazonWebServicesCredentialsBinding',
+                    credentialsId: 'aws-creds'
+                ]]) {
+
+                    sh """
+                    aws ecs update-service \
+                    --cluster ${ECS_CLUSTER} \
+                    --service ${ECS_SERVICE} \
+                    --force-new-deployment \
+                    --region ${AWS_REGION}
+                    """
+                }
+
             }
         }
 
     }
 
     post {
+
         success {
-            echo "Pipeline completed successfully."
+            echo "Deployment completed successfully."
         }
 
         failure {
-            echo "Pipeline failed."
+            echo "Deployment failed."
         }
+
     }
 }
