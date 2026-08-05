@@ -14,7 +14,7 @@ A real-time video conferencing application built with **React**, **Node.js**, **
 * 🖐️ Raise hand feature
 * 👑 Admin controls
 
-  * Remove participants.
+  * Remove participants
   * End meeting
 * 📊 Room statistics
 * 🔒 Room ID & passcode protection
