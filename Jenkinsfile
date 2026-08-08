@@ -17,7 +17,7 @@ pipeline {
         SERVER_IMAGE = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${SERVER_REPO}:latest"
 
         ECS_CLUSTER = "video-translate-cluster"
-        ECS_SERVICE = "video-translate-task-service"
+        ECS_SERVICE = "video-translate-task-service-f8uorjs2"
     }
 
     stages {
