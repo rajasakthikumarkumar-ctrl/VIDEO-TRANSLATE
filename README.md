@@ -2,7 +2,7 @@
 
 ## Problem Identified
 
-Your translation wasn't working because:
+Your translation wasn't working because
 
 1. **Groq API parameter issue**: The `language: "en"` parameter in Whisper transcription was causing errors
 2. **Poor error handling**: Errors were silently failing without proper logging
