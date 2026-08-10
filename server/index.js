@@ -12,12 +12,17 @@ dotenv.config();
 
 const app = express();
 
-// Always allow both local dev and Render production origins
+// Always allow both local dev and Render production origins.
+// For AWS ECS/Fargate: set the CLIENT_ORIGIN environment variable to the
+// ECS client's public URL (e.g. http://<ALB-DNS> or http://<task-IP>:3000).
+// This avoids hard-coding a changing Fargate public IP into the source.
 const ALLOWED_ORIGINS = [
   'http://localhost:3000',
   'http://localhost:3001',
   'https://video-meet-client.onrender.com',
-  'https://video-meet-aj54.onrender.com'
+  'https://video-meet-aj54.onrender.com',
+  // ECS/Fargate: injected at runtime via task definition environment variable
+  ...(process.env.CLIENT_ORIGIN ? [process.env.CLIENT_ORIGIN] : [])
 ];
 
 const corsOptions = {

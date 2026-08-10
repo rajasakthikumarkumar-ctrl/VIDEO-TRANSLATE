@@ -7,8 +7,8 @@ pipeline {
     }
 
     environment {
-        AWS_REGION = "ap-south-1"
-        AWS_ACCOUNT_ID = "030729259628"
+        AWS_REGION      = "ap-south-1"
+        AWS_ACCOUNT_ID  = "030729259628"
 
         CLIENT_REPO = "video-translate-client"
         SERVER_REPO = "video-translate-server"
@@ -18,6 +18,12 @@ pipeline {
 
         ECS_CLUSTER = "video-translate-cluster"
         ECS_SERVICE = "video-translate-task-service-f8uorjs2"
+
+        // ── ECS backend URL — browser-facing, baked into the React bundle ──
+        // Update ECS_SERVER_HOST to your ALB DNS name or ECS server public IP
+        // once it is stable. For a changing Fargate IP, use an ALB or a fixed
+        // domain and set it here. Do NOT use localhost here.
+        ECS_SERVER_HOST = "REPLACE_WITH_YOUR_ECS_SERVER_URL"   // e.g. http://my-alb-1234.ap-south-1.elb.amazonaws.com
     }
 
     stages {
@@ -32,7 +38,10 @@ pipeline {
             steps {
                 dir('client') {
                     sh """
-                    docker build -t ${CLIENT_IMAGE} .
+                    docker build \
+                      --build-arg REACT_APP_API_BASE=${ECS_SERVER_HOST}/api \
+                      --build-arg REACT_APP_SOCKET_URL=${ECS_SERVER_HOST} \
+                      -t ${CLIENT_IMAGE} .
                     """
                 }
             }

@@ -49,6 +49,6 @@ COPY --from=builder /app/build /usr/share/nginx/html
 # Without this, any direct URL like /room/abc returns 404 from nginx.
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-EXPOSE 3000
+EXPOSE 80
 
 CMD ["nginx", "-g", "daemon off;"]
