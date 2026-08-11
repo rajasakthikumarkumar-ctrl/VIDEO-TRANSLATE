@@ -9,9 +9,12 @@ client/build/
 # ── Secrets — NEVER commit these ─────────────────────────────────────────────
 .env
 .env.local
-.env.production
 .env.*.local
 server/.env
+
+# NOTE: client/.env.production is NOT in this list because it contains only
+# public URLs (API endpoints visible in the browser), not secrets.
+# It must be committed so Render can build with the correct backend URL.
 
 # ── Logs ──────────────────────────────────────────────────────────────────────
 *.log

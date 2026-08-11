@@ -1,25 +1,38 @@
-// Configuration — values are injected at BUILD time via REACT_APP_ environment variables.
+// Configuration — supports three injection methods:
 //
-// For local development:   no changes needed, defaults to localhost:5001
-// For Docker / EC2:        set REACT_APP_API_BASE and REACT_APP_SOCKET_URL
-//                          as Jenkins build args or in a .env file before running
-//                          `npm run build` inside the Docker build stage.
+// 1. Runtime (ECS/Docker): window.API_CONFIG set by docker-entrypoint.sh
+//    - Used when SERVER_URL environment variable is set at container startup
+//    - Allows single image to work with any backend URL
 //
-// Example (Jenkins / docker build-arg):
-//   REACT_APP_API_BASE=http://<EC2-IP>:5001/api
-//   REACT_APP_SOCKET_URL=http://<EC2-IP>:5001
+// 2. Build-time (Render): process.env.REACT_APP_* from .env.production
+//    - Values are baked into the bundle during `npm run build`
+//    - Used by Render deployment
+//
+// 3. Development: Falls back to localhost:5001
+//    - Used by `npm start` with .env.development
+//
+// Priority: window.API_CONFIG > process.env.REACT_APP_* > localhost
 
 const API_BASE =
-  process.env.REACT_APP_API_BASE || 'http://localhost:5001/api';
+  (typeof window !== 'undefined' && window.API_CONFIG?.apiBase) ||
+  process.env.REACT_APP_API_BASE ||
+  'http://localhost:5001/api';
 
 const SOCKET_URL =
-  process.env.REACT_APP_SOCKET_URL || 'http://localhost:5001';
+  (typeof window !== 'undefined' && window.API_CONFIG?.socketUrl) ||
+  process.env.REACT_APP_SOCKET_URL ||
+  'http://localhost:5001';
 
-// Development-only diagnostics — stripped out by the production build
-if (process.env.NODE_ENV !== 'production') {
-  console.log('🌍 Environment:', process.env.NODE_ENV);
-  console.log('📡 API Base:   ', API_BASE);
-  console.log('🔌 Socket URL: ', SOCKET_URL);
+// Log configuration for debugging (production logs are useful for verifying deployment)
+console.log('🌍 Environment:', process.env.NODE_ENV);
+console.log('📡 API Base:   ', API_BASE);
+console.log('🔌 Socket URL: ', SOCKET_URL);
+if (typeof window !== 'undefined' && window.API_CONFIG) {
+  console.log('✅ Using runtime configuration (ECS/Docker)');
+} else if (process.env.REACT_APP_API_BASE) {
+  console.log('✅ Using build-time configuration (Render)');
+} else {
+  console.log('✅ Using localhost (development)');
 }
 
 export { API_BASE, SOCKET_URL };

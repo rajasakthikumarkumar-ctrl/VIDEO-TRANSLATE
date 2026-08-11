@@ -36,6 +36,11 @@ RUN npm run build
 # The builder image (with node_modules, source code, build tooling) is
 # discarded here. Only the compiled static files are carried forward,
 # keeping the final image small (~25 MB vs ~500 MB).
+#
+# Runtime configuration:
+#   - Set SERVER_URL environment variable to point to the backend
+#   - Example: SERVER_URL=http://54.123.45.67:5001
+#   - The entrypoint script generates runtime-config.js with this URL
 # ─────────────────────────────────────────────────────────────────────────────
 FROM nginx:1.27-alpine AS production
 
@@ -49,6 +54,11 @@ COPY --from=builder /app/build /usr/share/nginx/html
 # Without this, any direct URL like /room/abc returns 404 from nginx.
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
+# Copy and set executable permission for entrypoint script
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
 EXPOSE 80
 
-CMD ["nginx", "-g", "daemon off;"]
+# Use custom entrypoint that generates runtime config before starting nginx
+ENTRYPOINT ["/docker-entrypoint.sh"]
