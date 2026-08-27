@@ -55,7 +55,7 @@ try {
 ### 3. Added Detailed Logging
 Now you'll see:
 ```
-🎙️ Sending to Groq Whisper for transcription....
+🎙️ Sending to Groq Whisper for transcription...
    File: temp_xxx.wav
    Size: 78471 bytes
 📝 Transcribed: "Hello, how are you?"
